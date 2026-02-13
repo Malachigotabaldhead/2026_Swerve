@@ -17,6 +17,8 @@ from wpilib import DriverStation
 from wpimath.geometry import Rotation2d
 from wpimath.units import rotationsToRadians
 
+import math
+
 
 class RobotContainer:
     """
@@ -66,22 +68,47 @@ class RobotContainer:
 
         # Note that X is defined as forward according to WPILib convention,
         # and Y is defined as to the left according to WPILib convention.
-        self.drivetrain.setDefaultCommand(
-            # Drivetrain will execute this command periodically
-            self.drivetrain.apply_request(
-                lambda: (
-                    self._drive.with_velocity_x(
-                        -self._joystick.getLeftY() * self._max_speed
-                    )  # Drive forward with negative Y (forward)
-                    .with_velocity_y(
-                        -self._joystick.getLeftX() * self._max_speed
-                    )  # Drive left with negative X (left)
-                    .with_rotational_rate(
-                        -self._joystick.getRightX() * self._max_angular_rate
-                    )  # Drive counterclockwise with negative X (left)
-                )
-            )
-        )
+        #        self.drivetrain.setDefaultCommand(
+        #            # Drivetrain will execute this command periodically
+        #            self.drivetrain.apply_request(
+        #                lambda: (
+        #                    self._drive.with_velocity_x(-squaring(self._joystick.getLeftY())
+        #                         * self._max_speed
+        #                    )  # Drive forward with negative Y (forward)
+        #                    .with_velocity_y(-squaring(self._joystick.getLeftX())
+        #                         * self._max_speed
+        #                    )  # Drive left with negative X (left)
+        #                    .with_rotational_rate(-squaring(self._joystick.getRightX())
+        #                        * self._max_angular_rate
+        #                    )  # Drive counterclockwise with negative X (left)
+        #                )
+        #            )
+        #        )
+        # Helper: convert joystick X/Y to polar, scale magnitude, convert back.
+        def to_polar(x: float, y: float):
+            return (math.hypot(x, y), math.atan2(y, x))
+
+        def from_polar(r: float, theta: float):
+            return (r * math.cos(theta), r * math.sin(theta))
+
+        def joystick_request():
+            # Map joystick so negative LeftY -> forward, negative LeftX -> left
+            jx = -self._joystick.getLeftX()  # left positive
+            jy = -self._joystick.getLeftY()  # forward positive
+
+            r, theta = to_polar(jx, jy)
+            r = min(1.0, r)
+            # Apply the same non-linear scaling you used previously, but to magnitude only
+            r_scaled = squaring(r)  # r >= 0 so squaring -> r^2
+            jx_s, jy_s = from_polar(r_scaled, theta)
+
+            vx = jy_s * self._max_speed  # forward
+            vy = jx_s * self._max_speed  # left
+            rot = -squaring(self._joystick.getRightX()) * self._max_angular_rate
+
+            return self._drive.with_velocity_x(vx).with_velocity_y(vy).with_rotational_rate(rot)
+
+        self.drivetrain.setDefaultCommand(self.drivetrain.apply_request(lambda: joystick_request()))
 
         # Idle while the robot is disabled. This ensures the configured
         # neutral mode is applied to the drive motors while disabled.
@@ -149,3 +176,7 @@ class RobotContainer:
             # Finally idle for the rest of auton
             self.drivetrain.apply_request(lambda: idle)
         )
+
+
+def squaring(x):
+    return abs(x)*(x)
