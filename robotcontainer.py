@@ -11,11 +11,15 @@ from commands2.sysid import SysIdRoutine
 
 from generated.tuner_constants import TunerConstants
 from telemetry import Telemetry
-
 from phoenix6 import swerve
 from wpilib import DriverStation
 from wpimath.geometry import Rotation2d
 from wpimath.units import rotationsToRadians
+
+# add import for Fuel subsystem
+from subsystems.fuel import Fuel
+# add import for the new command
+from commands.shooter_mode import ShooterMode
 
 import math
 
@@ -33,16 +37,16 @@ class RobotContainer:
             1.0 * TunerConstants.speed_at_12_volts
         )  # speed_at_12_volts desired top speed
         self._max_angular_rate = rotationsToRadians(
-            0.75
+            6
         )  # 3/4 of a rotation per second max angular velocity
 
         # Setting up bindings for necessary control of the swerve drive platform
         self._drive = (
             swerve.requests.FieldCentric()
-            .with_deadband(self._max_speed * 0.1)
+            .with_deadband(self._max_speed * 0)
             .with_rotational_deadband(
-                self._max_angular_rate * 0.1
-            )  # Add a 10% deadband
+                self._max_angular_rate * 0
+            )
             .with_drive_request_type(
                 swerve.SwerveModule.DriveRequestType.OPEN_LOOP_VOLTAGE
             )  # Use open-loop control for drive motors
@@ -52,9 +56,17 @@ class RobotContainer:
 
         self._logger = Telemetry(self._max_speed)
 
+        # Driver controller (port 0)
         self._joystick = CommandXboxController(0)
 
+        # Operator controller (port 1) - passed into subsystems that need operator inputs
+        self._operator = CommandXboxController(1)
+
         self.drivetrain = TunerConstants.create_drivetrain()
+
+        # instantiate fuel subsystem and pass the operator controller so
+        # all fuel controls and button bindings are on the same joystick
+        self.fuel = Fuel(self._operator)
 
         # Configure the button bindings
         self.configureButtonBindings()
@@ -117,7 +129,10 @@ class RobotContainer:
             self.drivetrain.apply_request(lambda: idle).ignoringDisable(True)
         )
 
-        self._joystick.a().whileTrue(self.drivetrain.apply_request(lambda: self._brake))
+        # Hold A on the operator controller: enter shooter mode (velocity control
+        # for shooters + intake/kicker/feed directions)
+        SHOOTER_TARGET_RPS = 30.0  # adjust to your desired velocity setpoint (RPS)
+        self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPS))
         self._joystick.b().whileTrue(
             self.drivetrain.apply_request(
                 lambda: self._point.with_module_direction(
