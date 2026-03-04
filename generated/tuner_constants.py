@@ -18,12 +18,12 @@ class TunerConstants:
     # output type specified by SwerveModuleConstants.SteerMotorClosedLoopOutput
     _steer_gains = (
         configs.Slot0Configs()
-        .with_k_p(3.0)               # lower P to reduce oscillation
+        .with_k_p(100)               # lower P to reduce oscillation
         .with_k_i(0)
-        .with_k_d(2.0)               # raise D to damp jitter
-        .with_k_s(0.05)              # smaller static feedforward
-        .with_k_v(1.2)               # smaller velocity FF (tune to units)
-        .with_k_a(0.02)              # small accel FF to smooth transients
+        .with_k_d(0.5)               # raise D to damp jitter
+        .with_k_s(0.1)              # smaller static feedforward
+        .with_k_v(2.66)               # smaller velocity FF (tune to units)
+        .with_k_a(0)              # small accel FF to smooth transients
         .with_static_feedforward_sign(
             signals.StaticFeedforwardSignValue.USE_CLOSED_LOOP_SIGN
         )

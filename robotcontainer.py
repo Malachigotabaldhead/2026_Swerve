@@ -131,8 +131,8 @@ class RobotContainer:
 
         # Hold A on the operator controller: enter shooter mode (velocity control
         # for shooters + intake/kicker/feed directions)
-        SHOOTER_TARGET_RPS = 30.0  # adjust to your desired velocity setpoint (RPS)
-        self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPS))
+        SHOOTER_TARGET_RPM = 3700.0  # adjust to your desired velocity setpoint (RPM)
+        self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPM))
         self._joystick.b().whileTrue(
             self.drivetrain.apply_request(
                 lambda: self._point.with_module_direction(

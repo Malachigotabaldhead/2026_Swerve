@@ -16,14 +16,14 @@ class ShooterMode(Command):
     def __init__(
         self,
         fuel: Fuel,
-        shooter_rps: float,
-        intake_pct: float = -0.5,
-        kicker_pct: float = -0.5,
-        feed_pct: float = 0.5,
+        shooter_rpm: float,
+        intake_pct: float = -0.2,
+        kicker_pct: float = -0.2,
+        feed_pct: float = 0.2,
     ) -> None:
         super().__init__()
         self._fuel = fuel
-        self._rps = shooter_rps
+        self._rpm = shooter_rpm
         self._intake = intake_pct
         self._kicker = kicker_pct
         self._feed = feed_pct
@@ -31,7 +31,7 @@ class ShooterMode(Command):
 
     def initialize(self) -> None:
         # Start shooter (tries closed-loop velocity, falls back to set())
-        self._fuel.start_shooters_velocity(self._rps)
+        self._fuel.start_shooters_velocity(self._rpm)
         # Set other mechanisms (open-loop percent)
         self._fuel.intake.set(self._intake)
         self._fuel.kicker.set(self._kicker)
@@ -39,7 +39,7 @@ class ShooterMode(Command):
 
     def execute(self) -> None:
         # Re-apply to ensure controllers stay commanded
-        self._fuel.start_shooters_velocity(self._rps)
+        self._fuel.start_shooters_velocity(self._rpm)
         self._fuel.intake.set(self._intake)
         self._fuel.kicker.set(self._kicker)
         self._fuel.feed.set(self._feed)
