@@ -20,6 +20,7 @@ from wpimath.units import rotationsToRadians
 from subsystems.fuel import Fuel
 # add import for the new command
 from commands.shooter_mode import ShooterMode
+from commands.adjust import Adjust
 
 import math
 
@@ -133,6 +134,10 @@ class RobotContainer:
         # for shooters + intake/kicker/feed directions)
         SHOOTER_TARGET_RPM = 3700.0  # adjust to your desired velocity setpoint (RPM)
         self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPM))
+
+        # Hold B on the operator controller: Adjust -> shoot in opposite direction
+        self._operator.b().whileTrue(Adjust(self.fuel))
+
         self._joystick.b().whileTrue(
             self.drivetrain.apply_request(
                 lambda: self._point.with_module_direction(
