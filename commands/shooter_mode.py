@@ -17,9 +17,9 @@ class ShooterMode(Command):
         self,
         fuel: Fuel,
         shooter_rpm: float,
-        intake_pct: float = -0.2,
-        kicker_pct: float = -0.2,
-        feed_pct: float = 0.2,
+        intake_pct: float = -0.5,
+        kicker_pct: float = -0.5,
+        feed_pct: float = 0.5,
     ) -> None:
         super().__init__()
         self._fuel = fuel

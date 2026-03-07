@@ -1,7 +1,7 @@
-from commands2 import CommandBase
+from commands2 import Command
 from subsystems.fuel import Fuel
 
-class Adjust(CommandBase):
+class Adjust(Command):
     """
     Hold-button command: run shooters in the opposite direction and flip intake/kicker/feed.
     """

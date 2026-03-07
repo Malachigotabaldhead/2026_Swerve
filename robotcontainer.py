@@ -132,7 +132,8 @@ class RobotContainer:
 
         # Hold A on the operator controller: enter shooter mode (velocity control
         # for shooters + intake/kicker/feed directions)
-        SHOOTER_TARGET_RPM = 3700.0  # adjust to your desired velocity setpoint (RPM)
+        SHOOTER_TARGET_RPM = 2250.0 # adjust to your desired velocity setpoint (RPM) 
+        #SHOOTER_TARGET_RPM = 2500 is the speed we need when we are 20 inches from the hub
         self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPM))
 
         # Hold B on the operator controller: Adjust -> shoot in opposite direction
@@ -176,25 +177,18 @@ class RobotContainer:
 
         :returns: the command to run in autonomous
         """
-        # Simple drive forward auton
         idle = swerve.requests.Idle()
+        SHOOTER_TARGET_RPM = 2250.0
+
         return cmd.sequence(
-            # Reset our field centric heading to match the robot
-            # facing away from our alliance station wall (0 deg).
-            self.drivetrain.runOnce(
-                lambda: self.drivetrain.seed_field_centric(Rotation2d.fromDegrees(0))
+            # 1. Lock the drivetrain in place (brake/idle) the entire time
+            #    by running shooter mode in parallel with an idle drivetrain request.
+            cmd.parallel(
+                self.drivetrain.apply_request(lambda: idle),
+                ShooterMode(self.fuel, SHOOTER_TARGET_RPM).withTimeout(5.0),
             ),
-            # Then slowly drive forward (away from us) for 5 seconds.
-            self.drivetrain.apply_request(
-                lambda: (
-                    self._drive.with_velocity_x(0.5)
-                    .with_velocity_y(0)
-                    .with_rotational_rate(0)
-                )
-            )
-            .withTimeout(5.0),
-            # Finally idle for the rest of auton
-            self.drivetrain.apply_request(lambda: idle)
+            # 2. Continue idling for the rest of autonomous
+            self.drivetrain.apply_request(lambda: idle),
         )
 
 
