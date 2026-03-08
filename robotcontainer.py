@@ -132,7 +132,7 @@ class RobotContainer:
 
         # Hold A on the operator controller: enter shooter mode (velocity control
         # for shooters + intake/kicker/feed directions)
-        SHOOTER_TARGET_RPM = 2250.0 # adjust to your desired velocity setpoint (RPM) 
+        SHOOTER_TARGET_RPM = 2350.0 # adjust to your desired velocity setpoint (RPM) 
         #SHOOTER_TARGET_RPM = 2500 is the speed we need when we are 20 inches from the hub
         self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPM))
 
@@ -178,7 +178,7 @@ class RobotContainer:
         :returns: the command to run in autonomous
         """
         idle = swerve.requests.Idle()
-        SHOOTER_TARGET_RPM = 2250.0
+        SHOOTER_TARGET_RPM = 2350.0
 
         return cmd.sequence(
             # 1. Lock the drivetrain in place (brake/idle) the entire time

@@ -50,6 +50,10 @@ class Fuel(Subsystem):
             # velocity control (units depend on device; we used RPM-based kFF)
             cfg.closedLoop.velocityFF(self._shooter_kFF)
 
+            # Configure encoder measurement settings for better velocity readings
+            cfg.encoder.uvwAverageDepth(2)
+            cfg.encoder.uvwMeasurementPeriod(10)
+
             # Apply to both shooter motors. Use safe reset/persist modes so we
             # don't unintentionally persist parameters to flash during testing.
             for _motor in (self.outside_shooter, self.inside_shooter):

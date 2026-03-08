@@ -1,13 +1,14 @@
 from commands2 import Command, Subsystem
 from commands2.sysid import SysIdRoutine
 import math
-from phoenix6 import SignalLogger, swerve, units, utils
+from phoenix6 import SignalLogger, swerve, units, utils, configs
 from typing import Callable, overload
 from wpilib import DriverStation, Notifier, RobotController
 from wpilib.sysid import SysIdRoutineLog
 from wpimath.geometry import Pose2d, Rotation2d
+from ntcore import NetworkTableInstance
 
-from generated.tuner_constants import TunerSwerveDrivetrain
+from generated.tuner_constants import TunerSwerveDrivetrain, TunerConstants
 
 
 class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
@@ -222,6 +223,32 @@ class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
         self._sys_id_routine_to_apply = self._sys_id_routine_translation
         """The SysId routine to test"""
 
+        # --- Steer PID/FF tuning via NetworkTables (Elastic) ---
+        self._steer_kP = 15
+        self._steer_kI = 0.0
+        self._steer_kD = 2
+        self._steer_kS = 0.05
+        self._steer_kV = 1.2
+        self._steer_kA = 0.01
+
+        nt = NetworkTableInstance.getDefault()
+        self._steer_table = nt.getTable("SteerTuning")
+        self._steer_table.getEntry("kP").setDouble(self._steer_kP)
+        self._steer_table.getEntry("kI").setDouble(self._steer_kI)
+        self._steer_table.getEntry("kD").setDouble(self._steer_kD)
+        self._steer_table.getEntry("kS").setDouble(self._steer_kS)
+        self._steer_table.getEntry("kV").setDouble(self._steer_kV)
+        self._steer_table.getEntry("kA").setDouble(self._steer_kA)
+
+        self._last_steer_gains = (
+            self._steer_kP,
+            self._steer_kI,
+            self._steer_kD,
+            self._steer_kS,
+            self._steer_kV,
+            self._steer_kA,
+        )
+
         if utils.is_simulation():
             self._start_sim_thread()
 
@@ -262,6 +289,32 @@ class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
         """
         return self._sys_id_routine_to_apply.dynamic(direction)
 
+    def _apply_steer_gains(self):
+        """
+        Apply current steer PID/FF values to all swerve module steer motors
+        using the phoenix6 TalonFX Slot0 config API.
+        """
+        slot0 = (
+            configs.Slot0Configs()
+            .with_k_p(self._steer_kP)
+            .with_k_i(self._steer_kI)
+            .with_k_d(self._steer_kD)
+            .with_k_s(self._steer_kS)
+            .with_k_v(self._steer_kV)
+            .with_k_a(self._steer_kA)
+        )
+
+        # Iterate over all swerve modules and apply to each steer motor
+        for module in self.modules:
+            steer_motor = module.steer_motor
+            steer_motor.configurator.apply(slot0)
+
+        print(
+            f"[SteerTuning] Applied: kP={self._steer_kP:.4f} kI={self._steer_kI:.4f} "
+            f"kD={self._steer_kD:.4f} kS={self._steer_kS:.4f} kV={self._steer_kV:.4f} "
+            f"kA={self._steer_kA:.4f}"
+        )
+
     def periodic(self):
         # Periodically try to apply the operator perspective.
         # If we haven't applied the operator perspective before, then we should apply it regardless of DS state.
@@ -277,6 +330,26 @@ class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
                     else self._BLUE_ALLIANCE_PERSPECTIVE_ROTATION
                 )
                 self._has_applied_operator_perspective = True
+
+        # --- Poll SteerTuning NetworkTables entries and apply if changed ---
+        t = self._steer_table
+        kP = t.getEntry("kP").getDouble(self._steer_kP)
+        kI = t.getEntry("kI").getDouble(self._steer_kI)
+        kD = t.getEntry("kD").getDouble(self._steer_kD)
+        kS = t.getEntry("kS").getDouble(self._steer_kS)
+        kV = t.getEntry("kV").getDouble(self._steer_kV)
+        kA = t.getEntry("kA").getDouble(self._steer_kA)
+
+        current_gains = (kP, kI, kD, kS, kV, kA)
+        if current_gains != self._last_steer_gains:
+            self._steer_kP = kP
+            self._steer_kI = kI
+            self._steer_kD = kD
+            self._steer_kS = kS
+            self._steer_kV = kV
+            self._steer_kA = kA
+            self._apply_steer_gains()
+            self._last_steer_gains = current_gains
 
     def _start_sim_thread(self):
         def _sim_periodic():
