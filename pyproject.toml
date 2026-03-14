@@ -28,5 +28,5 @@ requires = [
     # "robotpy-navx",
     # "robotpy-pathplannerlib",
     # "robotpy-playingwithfusion",
-    "robotpy-rev",
+    "robotpy-rev"
 ]

@@ -15,12 +15,14 @@ from phoenix6 import swerve
 from wpilib import DriverStation
 from wpimath.geometry import Rotation2d
 from wpimath.units import rotationsToRadians
+from ntcore import NetworkTableInstance
 
 # add import for Fuel subsystem
 from subsystems.fuel import Fuel
 # add import for the new command
 from commands.shooter_mode import ShooterMode
 from commands.adjust import Adjust
+from commands.intake_mode import IntakeMode
 
 import math
 
@@ -68,6 +70,13 @@ class RobotContainer:
         # instantiate fuel subsystem and pass the operator controller so
         # all fuel controls and button bindings are on the same joystick
         self.fuel = Fuel(self._operator)
+
+        # Limelight NetworkTables setup
+        nt = NetworkTableInstance.getDefault()
+        self._limelight_table = nt.getTable("limelight")
+
+        # Limelight mounting yaw offset (degrees)
+        self._limelight_yaw = 10.0
 
         # Configure the button bindings
         self.configureButtonBindings()
@@ -132,8 +141,12 @@ class RobotContainer:
 
         # Hold A on the operator controller: enter shooter mode (velocity control
         # for shooters + intake/kicker/feed directions)
-        SHOOTER_TARGET_RPM = 2350.0 # adjust to your desired velocity setpoint (RPM) 
-        #SHOOTER_TARGET_RPM = 2500 is the speed we need when we are 20 inches from the hub
+        SHOOTER_TARGET_RPM = 4100.0 # adjust to your desired velocity setpoint (RPM) 
+       
+        #80 inches minimum distance away = 3900 rpm
+        #129 inches minimum distance away = 4500 rpm
+        #153 inches minimum distance away = 5000 rpm
+        #98 inches minimum distance away = 4100 rpm
         self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPM))
 
         # Hold B on the operator controller: Adjust -> shoot in opposite direction
@@ -171,6 +184,29 @@ class RobotContainer:
             lambda state: self._logger.telemeterize(state)
         )
 
+    def periodic(self) -> None:
+        """
+        Called every robot frame (20 ms) from robotPeriodic.
+        Publishes robot orientation to the Limelight for MegaTag2,
+        and sets the Limelight camera pose.
+        """
+        # Get robot yaw from the Pigeon 2 via the drivetrain's pose
+        # The CTRE swerve drivetrain tracks pose using the Pigeon 2 internally.
+        robot_yaw_deg = self.drivetrain.get_state().pose.rotation().degrees()
+
+        # MegaTag2 requirement: SetRobotOrientation every frame
+        # LimelightHelpers equivalent via NetworkTables:
+        # Key: "robot_orientation_set" -> [yaw, yawRate, pitch, pitchRate, roll, rollRate]
+        self._limelight_table.getEntry("robot_orientation_set").setDoubleArray(
+            [robot_yaw_deg, 0.0, 0.0, 0.0, 0.0, 0.0]
+        )
+
+        # Also set the camera mounting pose (including our 10-degree yaw offset)
+        # Key: "camerapose_robotspace_set" -> [x, y, z, roll, pitch, yaw]
+        self._limelight_table.getEntry("camerapose_robotspace_set").setDoubleArray(
+            [0.0, 0.0, 0.0, 0.0, 0.0, self._limelight_yaw]
+        )
+
     def getAutonomousCommand(self) -> commands2.Command:
         """
         Use this to pass the autonomous command to the main {@link Robot} class.
@@ -178,16 +214,21 @@ class RobotContainer:
         :returns: the command to run in autonomous
         """
         idle = swerve.requests.Idle()
-        SHOOTER_TARGET_RPM = 2350.0
+        SHOOTER_TARGET_RPM = 4100.0
 
         return cmd.sequence(
-            # 1. Lock the drivetrain in place (brake/idle) the entire time
-            #    by running shooter mode in parallel with an idle drivetrain request.
+            # 0. Seed field-centric heading (zero the drivetrain)
+            self.drivetrain.runOnce(
+                lambda: self.drivetrain.seed_field_centric(Rotation2d.fromDegrees(0))
+            ),
+
+            # 1. Shoot while stationary
             cmd.parallel(
                 self.drivetrain.apply_request(lambda: idle),
                 ShooterMode(self.fuel, SHOOTER_TARGET_RPM).withTimeout(5.0),
             ),
-            # 2. Continue idling for the rest of autonomous
+
+            # 2. Idle for the rest of autonomous
             self.drivetrain.apply_request(lambda: idle),
         )
 

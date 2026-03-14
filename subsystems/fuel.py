@@ -14,22 +14,23 @@ _SPARKFLEX_MOTOR_TYPE = SparkFlex.MotorType.kBrushless
 class Fuel(Subsystem):
     """
     Subsystem 'fuel' using Spark Flex controllers (rev.SparkFlex).
-    Device IDs 14..18 -> Outside Shooter, Inside Shooter, Intake, Kicker, Feed
-    Outside Shooter is inverted.
+    Device IDs 14..18 -> Bottom Shooter, Top Shooter, Intake, Kicker, Feed
+    Both shooters spin in the same direction (both inverted).
     """
 
     def __init__(self, operator: CommandXboxController):
         super().__init__()
 
         # Instantiate the real SparkFlex objects with explicit motor type
-        self.outside_shooter = SparkFlex(14, _SPARKFLEX_MOTOR_TYPE)
-        self.inside_shooter = SparkFlex(15, _SPARKFLEX_MOTOR_TYPE)
+        self.bottom_shooter = SparkFlex(14, _SPARKFLEX_MOTOR_TYPE)
+        self.top_shooter = SparkFlex(15, _SPARKFLEX_MOTOR_TYPE)
         self.intake = SparkFlex(16, _SPARKFLEX_MOTOR_TYPE)
         self.kicker = SparkFlex(17, _SPARKFLEX_MOTOR_TYPE)
         self.feed = SparkFlex(18, _SPARKFLEX_MOTOR_TYPE)
 
-        # Outside Shooter specifically inverted
-        self.outside_shooter.setInverted(True)
+        # Both shooters inverted so they spin in the same correct direction
+        self.bottom_shooter.setInverted(True)
+        self.top_shooter.setInverted(True)
 
         # --- Shooter closed-loop gains (hard-coded initial guesses, RPM units) ---
         # store as instance attributes so dashboard/periodic can modify/apply them
@@ -46,18 +47,14 @@ class Fuel(Subsystem):
             cfg.closedLoop.P(self._shooter_kP)
             cfg.closedLoop.I(self._shooter_kI)
             cfg.closedLoop.D(self._shooter_kD)
-            # velocityFF expects a feed-forward tuned for the closed-loop
-            # velocity control (units depend on device; we used RPM-based kFF)
             cfg.closedLoop.velocityFF(self._shooter_kFF)
 
-            # Configure encoder measurement settings for better velocity readings
             cfg.encoder.uvwAverageDepth(2)
             cfg.encoder.uvwMeasurementPeriod(10)
 
-            # Apply to both shooter motors. Use safe reset/persist modes so we
-            # don't unintentionally persist parameters to flash during testing.
-            for _motor in (self.outside_shooter, self.inside_shooter):
-                _motor.configure(
+            # Apply to both shooter motors independently
+            for motor in (self.bottom_shooter, self.top_shooter):
+                motor.configure(
                     cfg,
                     rev.ResetMode.kNoResetSafeParameters,
                     rev.PersistMode.kNoPersistParameters,
@@ -100,11 +97,11 @@ class Fuel(Subsystem):
         def _default():
             left = self._operator.getLeftTriggerAxis()
             right = self._operator.getRightTriggerAxis()
-            power = (left - right) * 0.5  # scaled down by 50%
+            power = (left - right) * 1  
 
             # Shooter motors remain zero
-            self.outside_shooter.set(0.0)
-            self.inside_shooter.set(0.0)
+            self.bottom_shooter.set(0.0)
+            self.top_shooter.set(0.0)
 
             # Intake runs backward, Kicker forward, Feed backward (signs applied)
             self.intake.set(-power)
@@ -114,25 +111,24 @@ class Fuel(Subsystem):
         # Register the default command (runs every scheduler tick)
         self.setDefaultCommand(self.run(_default))
 
-    # --- new helper methods for the shooter command to call ---
+    # --- helper methods for the shooter command to call ---
     def start_shooters_velocity(self, rpm: float) -> None:
         """
-        Request the shooter motors to run at a velocity setpoint (rpm) using
+        Request both shooter motors to run at a velocity setpoint (rpm) using
         the rev SparkFlex closed-loop API via getClosedLoopController().
+        Both motors are commanded independently.
         """
-
-        # Use the Spark Flex ClosedLoopController API directly.
-        self.outside_shooter.getClosedLoopController().setReference(
+        self.bottom_shooter.getClosedLoopController().setReference(
             rpm, rev.SparkFlex.ControlType.kVelocity
         )
-        self.inside_shooter.getClosedLoopController().setReference(
+        self.top_shooter.getClosedLoopController().setReference(
             rpm, rev.SparkFlex.ControlType.kVelocity
         )
 
     def stop_shooters(self) -> None:
-        """Stop shooter motors."""
-        self.outside_shooter.set(0.0)
-        self.inside_shooter.set(0.0)
+        """Stop both shooter motors."""
+        self.bottom_shooter.set(0.0)
+        self.top_shooter.set(0.0)
 
     def periodic(self) -> None:
         """
@@ -179,14 +175,12 @@ class Fuel(Subsystem):
             else:
                 self.stop_shooters()
 
-        # publish actual encoder RPM if enabled. Use the SparkRelativeEncoder
-        # getVelocity() API directly (assumed to return RPM). Keep this simple
-        # and avoid runtime introspection — fall back to the setpoint if reading
-        # the encoder fails.
-        actual_rpm = 0.0
+        # publish actual encoder RPM if enabled
         if enabled:
-            enc = self.outside_shooter.getEncoder()
+            enc = self.top_shooter.getEncoder()
             actual_rpm = float(enc.getVelocity())
+        else:
+            actual_rpm = 0.0
 
         t.getEntry("actualRPM").setDouble(actual_rpm)
 
@@ -197,3 +191,11 @@ class Fuel(Subsystem):
         self._last_nt["kI"] = kI
         self._last_nt["kD"] = kD
         self._last_nt["kFF"] = kFF
+
+    def get_actual_rpm(self) -> float:
+        """
+        Return the measured RPM from the top shooter encoder.
+        Assumes encoder.getVelocity() returns RPM.
+        """
+        enc = self.top_shooter.getEncoder()
+        return float(enc.getVelocity())

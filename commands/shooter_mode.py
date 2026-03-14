@@ -17,9 +17,9 @@ class ShooterMode(Command):
         self,
         fuel: Fuel,
         shooter_rpm: float,
-        intake_pct: float = -0.5,
-        kicker_pct: float = -0.5,
-        feed_pct: float = 0.5,
+        intake_pct: float = -1,
+        kicker_pct: float = -1,
+        feed_pct: float = 1,
     ) -> None:
         super().__init__()
         self._fuel = fuel
@@ -28,21 +28,28 @@ class ShooterMode(Command):
         self._kicker = kicker_pct
         self._feed = feed_pct
         self.addRequirements(fuel)
+        # only run other mechanism motors once shooter within this many RPM of setpoint
+        self._rpm_tolerance = 1000.0
 
     def initialize(self) -> None:
-        # Start shooter (tries closed-loop velocity, falls back to set())
+        # Start shooter closed-loop velocity
         self._fuel.start_shooters_velocity(self._rpm)
-        # Set other mechanisms (open-loop percent)
-        self._fuel.intake.set(self._intake)
-        self._fuel.kicker.set(self._kicker)
-        self._fuel.feed.set(self._feed)
+        # Do NOT start intake/kicker/feed yet — wait for shooter to spin up
 
     def execute(self) -> None:
-        # Re-apply to ensure controllers stay commanded
+        # Always keep commanding the shooter setpoint
         self._fuel.start_shooters_velocity(self._rpm)
-        self._fuel.intake.set(self._intake)
-        self._fuel.kicker.set(self._kicker)
-        self._fuel.feed.set(self._feed)
+
+        # Only run intake/kicker/feed when shooter is within tolerance of setpoint
+        if abs(self._fuel.get_actual_rpm() - self._rpm) <= self._rpm_tolerance:
+            self._fuel.intake.set(self._intake)
+            self._fuel.kicker.set(self._kicker)
+            self._fuel.feed.set(self._feed)
+        else:
+            # Hold other mechanisms stopped while shooter spins up
+            self._fuel.intake.set(0.0)
+            self._fuel.kicker.set(0.0)
+            self._fuel.feed.set(0.0)
 
     def end(self, interrupted: bool) -> None:
         # Stop all driveables for safety
