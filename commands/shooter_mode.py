@@ -1,5 +1,6 @@
 from commands2 import Command
 from subsystems.fuel import Fuel
+from typing import Callable, Union
 
 class ShooterMode(Command):
     """
@@ -16,14 +17,15 @@ class ShooterMode(Command):
     def __init__(
         self,
         fuel: Fuel,
-        shooter_rpm: float,
+        shooter_rpm: Union[float, Callable[[], float]],
         intake_pct: float = -1,
         kicker_pct: float = -1,
         feed_pct: float = 1,
     ) -> None:
         super().__init__()
         self._fuel = fuel
-        self._rpm = shooter_rpm
+        # Accept either a fixed RPM or a callable that returns RPM
+        self._rpm_supplier = shooter_rpm if callable(shooter_rpm) else lambda: shooter_rpm
         self._intake = intake_pct
         self._kicker = kicker_pct
         self._feed = feed_pct
@@ -33,15 +35,18 @@ class ShooterMode(Command):
 
     def initialize(self) -> None:
         # Start shooter closed-loop velocity
-        self._fuel.start_shooters_velocity(self._rpm)
+        self._fuel.start_shooters_velocity(self._rpm_supplier())
         # Do NOT start intake/kicker/feed yet — wait for shooter to spin up
 
     def execute(self) -> None:
+        # Recalculate RPM each frame (distance may change)
+        rpm = self._rpm_supplier()
+
         # Always keep commanding the shooter setpoint
-        self._fuel.start_shooters_velocity(self._rpm)
+        self._fuel.start_shooters_velocity(rpm)
 
         # Only run intake/kicker/feed when shooter is within tolerance of setpoint
-        if abs(self._fuel.get_actual_rpm() - self._rpm) <= self._rpm_tolerance:
+        if abs(self._fuel.get_actual_rpm() - rpm) <= self._rpm_tolerance:
             self._fuel.intake.set(self._intake)
             self._fuel.kicker.set(self._kicker)
             self._fuel.feed.set(self._feed)

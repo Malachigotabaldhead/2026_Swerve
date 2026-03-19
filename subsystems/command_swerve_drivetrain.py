@@ -249,8 +249,87 @@ class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
             self._steer_kA,
         )
 
+        self._ll_table = nt.getTable("limelight-bulldog")
+
         if utils.is_simulation():
             self._start_sim_thread()
+
+    def _get_ll_mt2_pose_estimate(self):
+        """
+        Read MegaTag2 botpose from the limelight-bulldog NetworkTables table.
+        Returns (Pose2d, timestamp_seconds, tag_count) or None if no valid data.
+
+        NT key: botpose_orb_wpiblue -> [x, y, z, roll, pitch, yaw, latency, tagCount, ...]
+        """
+        pose_array = self._ll_table.getEntry("botpose_orb_wpiblue").getDoubleArray([])
+
+        # Limelight publishes at least 7 values: x, y, z, roll, pitch, yaw, latency
+        # Index 7 = tag count (when available)
+        if len(pose_array) < 7:
+            return None     
+
+        
+        x = pose_array[0]
+        y = pose_array[1]
+        yaw_deg = pose_array[5]
+        latency_ms = pose_array[6]
+        tag_count = int(pose_array[7]) if len(pose_array) > 7 else 0
+
+        # Timestamp: current FPGA time minus total latency
+        timestamp = RobotController.getFPGATime() / 1e6 - latency_ms / 1000.0
+
+        pose = Pose2d(x, y, Rotation2d.fromDegrees(yaw_deg))
+        return pose, timestamp, tag_count
+
+    def _get_robot_yaw_rate_deg_per_sec(self) -> float:
+        """
+        Return the robot's yaw rate in degrees per second from the Pigeon 2
+        via the drivetrain's chassis speeds.
+        """
+        return math.degrees(self.get_state().speeds.omega)
+ 
+    def update_vision_pose(self):
+        """
+        Read MegaTag2 pose from limelight-bulldog and feed it to the pose estimator.
+        Call this every frame from RobotContainer.periodic().
+
+        Rejects updates if:
+          - No AprilTags seen (tagCount == 0)
+          - Angular velocity > 360 deg/s (robot spinning too fast)
+        """
+        result = self._get_ll_mt2_pose_estimate()
+        if result is None:
+            return
+
+        pose, timestamp, tag_count = result
+
+        do_reject = False
+
+        # Reject if no tags seen
+        if tag_count == 0:
+            do_reject = True
+
+        # Reject if spinning faster than 360 deg/s
+        if abs(self._get_robot_yaw_rate_deg_per_sec()) > 360:
+            do_reject = True
+
+        if not do_reject:
+            # Standard deviations: trust x/y at 0.7m, ignore vision yaw (9999999)
+            # because MT2 uses our Pigeon 2 yaw — we don't want vision to override it
+            self.add_vision_measurement(
+                pose,
+                timestamp,
+                (0.7, 0.7, 9999999),
+            )
+    
+    def set_limelight_imu_mode(self, mode: int):
+        """
+        Set the Limelight IMU mode via NetworkTables.
+        Mode 0 = external only (default)
+        Mode 1 = seed internal IMU from external (use while disabled)
+        Mode 4 = internal IMU + external IMU assist (use while enabled)
+        """
+        self._ll_table.getEntry("imumode_set").setDouble(mode)
 
     def apply_request(
         self, request: Callable[[], swerve.requests.SwerveRequest]
@@ -350,6 +429,13 @@ class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
             self._steer_kA = kA
             self._apply_steer_gains()
             self._last_steer_gains = current_gains
+
+        state = self.get_state()
+        if state is not None and state.module_states is not None:
+            for i, mod_state in enumerate(state.module_states):
+                self._steer_table.getEntry(f"Module{i}_AngleDeg").setDouble(
+                    mod_state.angle.degrees()
+                )
 
     def _start_sim_thread(self):
         def _sim_periodic():

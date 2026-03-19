@@ -13,9 +13,11 @@ from generated.tuner_constants import TunerConstants
 from telemetry import Telemetry
 from phoenix6 import swerve
 from wpilib import DriverStation
-from wpimath.geometry import Rotation2d
+from wpimath.geometry import Rotation2d, Translation2d
 from wpimath.units import rotationsToRadians
 from ntcore import NetworkTableInstance
+
+import math
 
 # add import for Fuel subsystem
 from subsystems.fuel import Fuel
@@ -23,8 +25,6 @@ from subsystems.fuel import Fuel
 from commands.shooter_mode import ShooterMode
 from commands.adjust import Adjust
 from commands.intake_mode import IntakeMode
-
-import math
 
 
 class RobotContainer:
@@ -34,6 +34,41 @@ class RobotContainer:
     periodic methods (other than the scheduler calls). Instead, the structure of the robot (including
     subsystems, commands, and button mappings) should be declared here.
     """
+
+    # Single source of truth for shooter RPM used by teleop and autonomous
+    SHOOTER_TARGET_RPM: float = 4100.0
+
+    # Fixed hub positions on the field
+    # Blue alliance hub position
+    _BLUE_HUB_POSITION = Translation2d(11.91, 4.03)
+    # Red alliance hub position (mirrored across field center: 16.54 - 11.91 = 4.63)
+    _RED_HUB_POSITION = Translation2d(16.54 - 11.91, 4.03)
+
+    @property
+    def HUB_POSITION(self) -> Translation2d:
+        """
+        Return the correct hub position based on the current driver station alliance.
+        Defaults to blue if alliance is unknown.
+        """
+        alliance = DriverStation.getAlliance()
+        if alliance == DriverStation.Alliance.kRed:
+            return self._RED_HUB_POSITION
+        else:
+            return self._BLUE_HUB_POSITION
+
+    # Meters to inches conversion factor
+    _METERS_TO_INCHES = 39.3701
+
+    def get_shooter_rpm(self) -> float:
+        """
+        Compute the required shooter RPM based on distance to the hub.
+        Uses the equation: v(d) = 0.1007d^2 - 8.631d + 3956.73
+        where d is the distance in inches from the robot to the hub.
+        """
+        distance_m = self._get_distance_to_hub()
+        d = distance_m * self._METERS_TO_INCHES  # convert to inches
+        rpm = 0.1007 * d * d - 8.631 * d + 3956.73
+        return rpm
 
     def __init__(self) -> None:
         self._max_speed = (
@@ -57,6 +92,20 @@ class RobotContainer:
         self._brake = swerve.requests.SwerveDriveBrake()
         self._point = swerve.requests.PointWheelsAt()
 
+        # --- Hub-facing drive request ---
+        # FieldCentricFacingAngle: driver controls translation, heading auto-aims at hub
+        self._face_hub = (
+            swerve.requests.FieldCentricFacingAngle()
+            .with_deadband(self._max_speed * 0.1)
+            .with_rotational_deadband(0.05)
+            .with_drive_request_type(
+                swerve.SwerveModule.DriveRequestType.OPEN_LOOP_VOLTAGE
+            )
+            # Tune these PID gains for how aggressively the robot turns to face the hub
+            # This PID operates on heading radians -> outputs rad/s
+            .with_heading_pid(5.0, 0.0, 0.0)
+        )
+
         self._logger = Telemetry(self._max_speed)
 
         # Driver controller (port 0)
@@ -71,12 +120,9 @@ class RobotContainer:
         # all fuel controls and button bindings are on the same joystick
         self.fuel = Fuel(self._operator)
 
-        # Limelight NetworkTables setup
+        # Limelight NetworkTables setup (table name must match the Limelight's name)
         nt = NetworkTableInstance.getDefault()
-        self._limelight_table = nt.getTable("limelight")
-
-        # Limelight mounting yaw offset (degrees)
-        self._limelight_yaw = 10.0
+        self._limelight_table = nt.getTable("limelight-bulldog")
 
         # Configure the button bindings
         self.configureButtonBindings()
@@ -141,13 +187,12 @@ class RobotContainer:
 
         # Hold A on the operator controller: enter shooter mode (velocity control
         # for shooters + intake/kicker/feed directions)
-        SHOOTER_TARGET_RPM = 4100.0 # adjust to your desired velocity setpoint (RPM) 
-       
+        # v(d) = 0.1007d^2 - 8.631d + 3956.73 (d in inches)
         #80 inches minimum distance away = 3900 rpm
         #129 inches minimum distance away = 4500 rpm
         #153 inches minimum distance away = 5000 rpm
         #98 inches minimum distance away = 4100 rpm
-        self._operator.a().whileTrue(ShooterMode(self.fuel, SHOOTER_TARGET_RPM))
+        self._operator.a().whileTrue(ShooterMode(self.fuel, self.get_shooter_rpm))
 
         # Hold B on the operator controller: Adjust -> shoot in opposite direction
         self._operator.b().whileTrue(Adjust(self.fuel))
@@ -184,28 +229,69 @@ class RobotContainer:
             lambda state: self._logger.telemeterize(state)
         )
 
+        # Hold right bumper on driver controller: drive normally but auto-aim at hub
+        def hub_facing_request():
+            # Driver still controls translation with joysticks
+            jx = -self._joystick.getLeftX()
+            jy = -self._joystick.getLeftY()
+
+            r, theta = to_polar(jx, jy)
+            r = min(1.0, r)
+            r_scaled = squaring(r)
+            jx_s, jy_s = from_polar(r_scaled, theta)
+
+            vx = jy_s * self._max_speed
+            vy = jx_s * self._max_speed
+
+            # Compute the angle to the hub and set as target direction
+            angle_to_hub = self._get_angle_to_hub()
+
+            return (
+                self._face_hub
+                .with_velocity_x(vx)
+                .with_velocity_y(vy)
+                .with_target_direction(angle_to_hub)
+            )
+
+        self._joystick.rightBumper().whileTrue(
+            self.drivetrain.apply_request(lambda: hub_facing_request())
+        )
+
     def periodic(self) -> None:
         """
         Called every robot frame (20 ms) from robotPeriodic.
-        Publishes robot orientation to the Limelight for MegaTag2,
-        and sets the Limelight camera pose.
+        Publishes robot orientation to the Limelight for MegaTag2.
+        Must be called every frame before reading MegaTag2 pose estimates.
         """
-        # Get robot yaw from the Pigeon 2 via the drivetrain's pose
-        # The CTRE swerve drivetrain tracks pose using the Pigeon 2 internally.
         robot_yaw_deg = self.drivetrain.get_state().pose.rotation().degrees()
 
         # MegaTag2 requirement: SetRobotOrientation every frame
-        # LimelightHelpers equivalent via NetworkTables:
-        # Key: "robot_orientation_set" -> [yaw, yawRate, pitch, pitchRate, roll, rollRate]
+        # [yaw, yawRate, pitch, pitchRate, roll, rollRate]
+        yaw_rate = self.drivetrain._get_robot_yaw_rate_deg_per_sec()
         self._limelight_table.getEntry("robot_orientation_set").setDoubleArray(
-            [robot_yaw_deg, 0.0, 0.0, 0.0, 0.0, 0.0]
+            [robot_yaw_deg, yaw_rate, 0.0, 0.0, 0.0, 0.0]
         )
 
-        # Also set the camera mounting pose (including our 10-degree yaw offset)
-        # Key: "camerapose_robotspace_set" -> [x, y, z, roll, pitch, yaw]
-        self._limelight_table.getEntry("camerapose_robotspace_set").setDoubleArray(
-            [0.0, 0.0, 0.0, 0.0, 0.0, self._limelight_yaw]
-        )
+        # Publish hub-tracking debug info
+        angle_to_hub = self._get_angle_to_hub()
+        distance_to_hub = self._get_distance_to_hub()
+        self._limelight_table.getEntry("hub_angle_deg").setDouble(angle_to_hub.degrees())
+        self._limelight_table.getEntry("hub_distance_m").setDouble(distance_to_hub)
+
+        # Set Limelight IMU mode based on robot state
+        if DriverStation.isDisabled():
+            # Seed internal IMU from external while disabled
+            self.drivetrain.set_limelight_imu_mode(1)
+        else:
+            # Use external IMU while enabled
+            self.drivetrain.set_limelight_imu_mode(0)
+
+        # Consume MegaTag2 vision pose estimates and feed to pose estimator
+        self.drivetrain.update_vision_pose()
+
+        # Flush NT to ensure the Limelight receives the orientation update
+        # immediately (matches the Java SetRobotOrientation flush behavior).
+        NetworkTableInstance.getDefault().flush()
 
     def getAutonomousCommand(self) -> commands2.Command:
         """
@@ -214,7 +300,6 @@ class RobotContainer:
         :returns: the command to run in autonomous
         """
         idle = swerve.requests.Idle()
-        SHOOTER_TARGET_RPM = 4100.0
 
         return cmd.sequence(
             # 0. Seed field-centric heading (zero the drivetrain)
@@ -222,16 +307,39 @@ class RobotContainer:
                 lambda: self.drivetrain.seed_field_centric(Rotation2d.fromDegrees(0))
             ),
 
-            # 1. Shoot while stationary
+            # 1. Shoot while stationary — use dynamic RPM from distance equation
+            # v(d) = 0.1007d^2 - 8.631d + 3956.73 (d in inches)
             cmd.parallel(
                 self.drivetrain.apply_request(lambda: idle),
-                ShooterMode(self.fuel, SHOOTER_TARGET_RPM).withTimeout(5.0),
+                ShooterMode(self.fuel, self.get_shooter_rpm).withTimeout(5.0),
             ),
 
             # 2. Idle for the rest of autonomous
             self.drivetrain.apply_request(lambda: idle),
         )
 
+    def _get_angle_to_hub(self) -> Rotation2d:
+        """
+        Compute the field-relative angle from the robot's current pose
+        to the fixed hub position. Returns a Rotation2d the robot should face.
+        """
+        robot_pose = self.drivetrain.get_state().pose
+        robot_translation = robot_pose.translation()
 
+        # Vector from robot to hub
+        dx = self.HUB_POSITION.x - robot_translation.x
+        dy = self.HUB_POSITION.y - robot_translation.y
+
+        # atan2(dy, dx) gives the field-relative angle to the hub
+        angle_to_hub = Rotation2d(math.atan2(dy, dx))
+        return angle_to_hub
+
+    def _get_distance_to_hub(self) -> float:
+        """
+        Return distance in meters from robot to the hub.
+        """
+        robot_pose = self.drivetrain.get_state().pose
+        robot_translation = robot_pose.translation()
+        return robot_translation.distance(self.HUB_POSITION)
 def squaring(x):
     return abs(x)*(x)
