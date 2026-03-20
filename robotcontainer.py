@@ -12,16 +12,16 @@ from commands2.sysid import SysIdRoutine
 from generated.tuner_constants import TunerConstants
 from telemetry import Telemetry
 from phoenix6 import swerve
-from wpilib import DriverStation
+from wpilib import DriverStation, SmartDashboard
 from wpimath.geometry import Rotation2d, Translation2d
 from wpimath.units import rotationsToRadians
 from ntcore import NetworkTableInstance
 
 import math
 
-# add import for Fuel subsystem
+from pathplannerlib.auto import AutoBuilder, NamedCommands
+
 from subsystems.fuel import Fuel
-# add import for the new command
 from commands.shooter_mode import ShooterMode
 from commands.adjust import Adjust
 from commands.intake_mode import IntakeMode
@@ -39,10 +39,8 @@ class RobotContainer:
     SHOOTER_TARGET_RPM: float = 4100.0
 
     # Fixed hub positions on the field
-    # Blue alliance hub position
-    _BLUE_HUB_POSITION = Translation2d(11.91, 4.03)
-    # Red alliance hub position (mirrored across field center: 16.54 - 11.91 = 4.63)
-    _RED_HUB_POSITION = Translation2d(16.54 - 11.91, 4.03)
+    _BLUE_HUB_POSITION = Translation2d(16.54 - 11.91, 4.03)
+    _RED_HUB_POSITION = Translation2d(11.91, 4.03)
 
     @property
     def HUB_POSITION(self) -> Translation2d:
@@ -126,6 +124,20 @@ class RobotContainer:
 
         # Configure the button bindings
         self.configureButtonBindings()
+
+        # --- PathPlanner Named Commands ---
+        # Register commands that can be triggered from PathPlanner event markers
+        NamedCommands.registerCommand(
+            "shoot", ShooterMode(self.fuel, self.get_shooter_rpm).withTimeout(3.0)
+        )
+        NamedCommands.registerCommand(
+            "intake", IntakeMode(self.fuel).withTimeout(3.0)
+        )
+
+        # --- Auto Chooser ---
+        # Build an auto chooser from autos in deploy/pathplanner/autos/
+        self._auto_chooser = AutoBuilder.buildAutoChooser()
+        SmartDashboard.putData("Auto Chooser", self._auto_chooser)
 
     def configureButtonBindings(self) -> None:
         """
@@ -296,27 +308,11 @@ class RobotContainer:
     def getAutonomousCommand(self) -> commands2.Command:
         """
         Use this to pass the autonomous command to the main {@link Robot} class.
+        Returns the auto selected from the PathPlanner auto chooser on the dashboard.
 
         :returns: the command to run in autonomous
         """
-        idle = swerve.requests.Idle()
-
-        return cmd.sequence(
-            # 0. Seed field-centric heading (zero the drivetrain)
-            self.drivetrain.runOnce(
-                lambda: self.drivetrain.seed_field_centric(Rotation2d.fromDegrees(0))
-            ),
-
-            # 1. Shoot while stationary — use dynamic RPM from distance equation
-            # v(d) = 0.1007d^2 - 8.631d + 3956.73 (d in inches)
-            cmd.parallel(
-                self.drivetrain.apply_request(lambda: idle),
-                ShooterMode(self.fuel, self.get_shooter_rpm).withTimeout(5.0),
-            ),
-
-            # 2. Idle for the rest of autonomous
-            self.drivetrain.apply_request(lambda: idle),
-        )
+        return self._auto_chooser.getSelected()
 
     def _get_angle_to_hub(self) -> Rotation2d:
         """

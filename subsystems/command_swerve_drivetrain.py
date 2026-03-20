@@ -10,6 +10,10 @@ from ntcore import NetworkTableInstance
 
 from generated.tuner_constants import TunerSwerveDrivetrain, TunerConstants
 
+from pathplannerlib.auto import AutoBuilder
+from pathplannerlib.config import RobotConfig, PIDConstants
+from pathplannerlib.controller import PPHolonomicDriveController
+
 
 class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
     """
@@ -254,6 +258,24 @@ class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
         if utils.is_simulation():
             self._start_sim_thread()
 
+        # --- PathPlanner AutoBuilder configuration ---
+        # Load robot config from deploy/pathplanner/settings.json
+        config = RobotConfig.fromGUISettings()
+
+        AutoBuilder.configure(
+            self._get_pose,                # Supplier<Pose2d> - robot pose
+            self._reset_pose,              # Consumer<Pose2d> - reset odometry
+            self._get_chassis_speeds,      # Supplier<ChassisSpeeds> - measured speeds
+            self._drive_chassis_speeds,    # Consumer<ChassisSpeeds> - drive robot
+            PPHolonomicDriveController(
+                PIDConstants(5.0, 0.0, 0.0),   # Translation PID (tune to your robot)
+                PIDConstants(5.0, 0.0, 0.0),   # Rotation PID (tune to your robot)
+            ),
+            config,                         # RobotConfig from GUI settings
+            self._should_flip_path,         # BooleanSupplier - flip for red alliance
+            self,                           # Subsystem requirement (this drivetrain)
+        )
+
     def _get_ll_mt2_pose_estimate(self):
         """
         Read MegaTag2 botpose from the limelight-bulldog NetworkTables table.
@@ -491,3 +513,35 @@ class CommandSwerveDrivetrain(Subsystem, TunerSwerveDrivetrain):
         :rtype: Pose2d | None
         """
         return TunerSwerveDrivetrain.sample_pose_at(self, utils.fpga_to_current_time(timestamp))
+
+    def _get_pose(self) -> Pose2d:
+        """Return the current robot pose from the swerve pose estimator."""
+        return self.get_state().pose
+
+    def _reset_pose(self, pose: Pose2d) -> None:
+        """Reset the pose estimator to the given pose."""
+        self.reset_pose(pose)
+
+    def _get_chassis_speeds(self):
+        """Return the current measured ChassisSpeeds."""
+        from wpimath.kinematics import ChassisSpeeds
+        state = self.get_state()
+        return state.speeds if state.speeds is not None else ChassisSpeeds()
+
+    def _drive_chassis_speeds(self, speeds) -> None:
+        """
+        Drive the robot using the given ChassisSpeeds.
+        PathPlanner calls this to command the drivetrain during path following.
+        """
+        self.set_control(
+            swerve.requests.ApplyRobotSpeeds()
+            .with_speeds(speeds)
+        )
+
+    def _should_flip_path(self) -> bool:
+        """
+        Return True if paths should be flipped for red alliance.
+        PathPlanner paths are authored for blue alliance by default.
+        """
+        alliance = DriverStation.getAlliance()
+        return alliance == DriverStation.Alliance.kRed
