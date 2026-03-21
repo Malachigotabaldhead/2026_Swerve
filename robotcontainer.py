@@ -318,9 +318,12 @@ class RobotContainer:
         """
         Compute the field-relative angle from the robot's current pose
         to the fixed hub position. Returns a Rotation2d the robot should face.
+
+        Note: FieldCentricFacingAngle applies the operator perspective rotation
+        to the target direction. On red alliance the perspective is rotated 180°,
+        so we must compensate by adding 180° for red alliance.
         """
-        robot_pose = self.drivetrain.get_state().pose
-        robot_translation = robot_pose.translation()
+        robot_translation = self.drivetrain.get_state().pose.translation()
 
         # Vector from robot to hub
         dx = self.HUB_POSITION.x - robot_translation.x
@@ -328,6 +331,12 @@ class RobotContainer:
 
         # atan2(dy, dx) gives the field-relative angle to the hub
         angle_to_hub = Rotation2d(math.atan2(dy, dx))
+
+        # Compensate for red alliance operator perspective (180° rotation)
+        alliance = DriverStation.getAlliance()
+        if alliance == DriverStation.Alliance.kRed:
+            angle_to_hub = angle_to_hub.rotateBy(Rotation2d.fromDegrees(180))
+
         return angle_to_hub
 
     def _get_distance_to_hub(self) -> float:
