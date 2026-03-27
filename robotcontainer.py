@@ -12,7 +12,7 @@ from commands2.sysid import SysIdRoutine
 from generated.tuner_constants import TunerConstants
 from telemetry import Telemetry
 from phoenix6 import swerve
-from wpilib import DriverStation, SmartDashboard
+from wpilib import DriverStation, SmartDashboard, SendableChooser
 from wpimath.geometry import Rotation2d, Translation2d
 from wpimath.units import rotationsToRadians
 from ntcore import NetworkTableInstance
@@ -131,33 +131,21 @@ class RobotContainer:
         # Configure the button bindings
         self.configureButtonBindings()
 
-        # --- PathPlanner Named Commands ---
-        # Register commands that can be triggered from PathPlanner event markers
-        NamedCommands.registerCommand(
-            "shoot", ShooterMode(self.fuel, self.get_shooter_rpm).withTimeout(9)
-        )
-        NamedCommands.registerCommand(
-            "intake", IntakeMode(self.fuel).withTimeout(9)
-        )
-        NamedCommands.registerCommand(
-            "align", AlignToHub(
-                self.drivetrain,
-                self._face_hub,
-                self._get_angle_to_hub,
-                tolerance_deg=3.0,
-            ).withTimeout(2.0)
-        )
-
         # --- Auto Chooser ---
-        # Build an auto chooser from autos in deploy/pathplanner/autos/
-        self._auto_chooser = AutoBuilder.buildAutoChooser()
+        # All autos are code-built — no .auto files needed
+        self._auto_chooser = SendableChooser()
 
-        # Add mirrored versions of the autos to the chooser
-        self._auto_chooser.addOption(
-            "New Auto (Mirrored)", self._build_mirrored_auto()
+        self._auto_chooser.setDefaultOption(
+            "Short Right Path", self._build_auto("Short")
         )
         self._auto_chooser.addOption(
-            "Long Auto (Mirrored)", self._build_mirrored_long_auto()
+            "Short Left Path", self._build_auto("Short", mirror=True)
+        )
+        self._auto_chooser.addOption(
+            "Long Right Path", self._build_auto("Long", shoot_first=True)
+        )
+        self._auto_chooser.addOption(
+            "Long Left Path", self._build_auto("Long", mirror=True, shoot_first=True)
         )
 
         SmartDashboard.putData("Auto Chooser", self._auto_chooser)
@@ -298,6 +286,20 @@ class RobotContainer:
         Publishes robot orientation to the Limelight for MegaTag2.
         Must be called every frame before reading MegaTag2 pose estimates.
         """
+        is_disabled = DriverStation.isDisabled()
+
+        # Set Limelight IMU mode based on robot state (lightweight, always run)
+        if is_disabled:
+            self.drivetrain.set_limelight_imu_mode(1)
+        else:
+            self.drivetrain.set_limelight_imu_mode(0)
+
+        # Skip expensive computations while disabled to avoid loop overruns
+        if is_disabled:
+            return
+
+        # --- Everything below only runs when enabled ---
+
         robot_yaw_deg = self.drivetrain.get_state().pose.rotation().degrees()
 
         # MegaTag2 requirement: SetRobotOrientation every frame
@@ -310,16 +312,14 @@ class RobotContainer:
         # Publish hub-tracking debug info
         angle_to_hub = self._get_angle_to_hub()
         distance_to_hub = self._get_distance_to_hub()
+        distance_to_hub_in = distance_to_hub * self._METERS_TO_INCHES
+        computed_rpm = self.get_shooter_rpm()
+
         self._limelight_table.getEntry("hub_angle_deg").setDouble(angle_to_hub.degrees())
         self._limelight_table.getEntry("hub_distance_m").setDouble(distance_to_hub)
-
-        # Set Limelight IMU mode based on robot state
-        if DriverStation.isDisabled():
-            # Seed internal IMU from external while disabled
-            self.drivetrain.set_limelight_imu_mode(1)
-        else:
-            # Use external IMU while enabled
-            self.drivetrain.set_limelight_imu_mode(0)
+        self._limelight_table.getEntry("hub_distance_in").setDouble(distance_to_hub_in)
+        self._limelight_table.getEntry("computed_shooter_rpm").setDouble(computed_rpm)
+        self._limelight_table.getEntry("actual_shooter_rpm").setDouble(self.fuel.get_actual_rpm())
 
         # Consume MegaTag2 vision pose estimates and feed to pose estimator
         self.drivetrain.update_vision_pose()
@@ -331,36 +331,46 @@ class RobotContainer:
     def getAutonomousCommand(self) -> commands2.Command:
         """
         Use this to pass the autonomous command to the main {@link Robot} class.
-        Returns the auto selected from the PathPlanner auto chooser on the dashboard.
-
-        PathPlanner's "resetOdom: true" in the .auto file resets the pose
-        estimator to the path's starting pose. _should_flip_path() handles
-        red alliance mirroring. Do NOT seed field-centric here.
+        Returns the auto selected from the code-built auto chooser on the dashboard.
 
         :returns: the command to run in autonomous
         """
         return self._auto_chooser.getSelected()
 
-    def _build_mirrored_auto(self) -> commands2.Command:
+    def _build_auto(self, path_name: str, mirror: bool = False, shoot_first: bool = False) -> commands2.Command:
         """
-        Build a mirrored version of the 'New New New Path' auto.
-        mirrorPath() flips the path across the field's Y-axis midline
-        (top <-> bottom of field). Alliance flipping (blue <-> red)
-        is still handled automatically by _should_flip_path().
-        """
-        original_path = PathPlannerPath.fromPathFile("New New New Path")
-        mirrored_path = original_path.mirrorPath()
+        Build an autonomous command from a PathPlanner path file.
+        Optionally mirrors the path across the field's Y-axis midline.
+        Alliance flipping (blue <-> red) is handled automatically by _should_flip_path().
 
-        return cmd.sequence(
-            # Reset odometry to the mirrored path's starting pose
+        Sequence:
+          1. (Optional) Shoot pre-loaded game piece
+          2. Reset odometry to path starting pose
+          3. Follow path + intake in parallel
+          4. Align to hub + shoot in parallel
+        """
+        path = PathPlannerPath.fromPathFile(path_name)
+        if mirror:
+            path = path.mirrorPath()
+
+        steps = []
+
+        # Optionally shoot pre-loaded game piece before driving
+        if shoot_first:
+            steps.append(
+                ShooterMode(self.fuel, self.get_shooter_rpm).withTimeout(1.5)
+            )
+
+        steps.extend([
+            # Reset odometry to the path's starting pose
             self.drivetrain.runOnce(
                 lambda: self.drivetrain.reset_pose(
-                    mirrored_path.getStartingHolonomicPose()
+                    path.getStartingHolonomicPose()
                 )
             ),
-            # Run intake in parallel with following the mirrored path
+            # Run intake in parallel with following the path
             cmd.parallel(
-                AutoBuilder.followPath(mirrored_path),
+                AutoBuilder.followPath(path),
                 IntakeMode(self.fuel).withTimeout(9),
             ),
             # Align to hub AND shoot at the same time
@@ -372,42 +382,10 @@ class RobotContainer:
                     tolerance_deg=3.0,
                 ),
                 ShooterMode(self.fuel, self.get_shooter_rpm),
-            ).withTimeout(9),
-        )
+            ).withTimeout(15),
+        ])
 
-    def _build_mirrored_long_auto(self) -> commands2.Command:
-        """
-        Build a mirrored version of the 'Long' auto.
-        mirrorPath() flips the path across the field's Y-axis midline
-        (top <-> bottom of field). Alliance flipping (blue <-> red)
-        is still handled automatically by _should_flip_path().
-        """
-        original_path = PathPlannerPath.fromPathFile("Long")
-        mirrored_path = original_path.mirrorPath()
-
-        return cmd.sequence(
-            # Reset odometry to the mirrored path's starting pose
-            self.drivetrain.runOnce(
-                lambda: self.drivetrain.reset_pose(
-                    mirrored_path.getStartingHolonomicPose()
-                )
-            ),
-            # Run intake in parallel with following the mirrored path
-            cmd.parallel(
-                AutoBuilder.followPath(mirrored_path),
-                IntakeMode(self.fuel).withTimeout(9),
-            ),
-            # Align to hub AND shoot at the same time
-            cmd.parallel(
-                AlignToHub(
-                    self.drivetrain,
-                    self._face_hub,
-                    self._get_angle_to_hub,
-                    tolerance_deg=3.0,
-                ),
-                ShooterMode(self.fuel, self.get_shooter_rpm),
-            ).withTimeout(9),
-        )
+        return cmd.sequence(*steps)
 
     def _get_angle_to_hub(self) -> Rotation2d:
         """

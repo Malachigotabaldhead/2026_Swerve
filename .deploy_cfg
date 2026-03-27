@@ -1,0 +1,9 @@
+[robotpy]
+ignore =
+    logs
+    __pycache__
+    .git
+    .pytest_cache
+    ctre_sim
+    .wpilib
+    .roboRIOTeamNumberSetter
